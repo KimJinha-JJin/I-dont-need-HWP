@@ -399,7 +399,7 @@ function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// 텍스트를 HTML로 변환: 이미지 마커 → <img>, 줄바꿈 → <br>
+/// 텍스트를 HTML로 변환: 이미지 마커 → <img>, 줄바꿈 → <br>
 function renderText(s) {
   return s
     .split(/\x02IMG:([^\x03]*)\x03/)
@@ -407,6 +407,22 @@ function renderText(s) {
       ? `<img src="${part}" style="max-width:100%;height:auto">`
       : escHtml(part).replace(/\n/g, '<br>'))
     .join('');
+}
+
+// _paraContent 결과(parts + align)를 스타일 적용 HTML <p>로 변환
+function _partsToHtml(parts, align) {
+  const inner = parts.map(p => {
+    if (p.type === 'image') return `<img src="${p.src}" style="max-width:100%;height:auto">`;
+    let s = escHtml(p.value).replace(/\n/g, '<br>');
+    if (!s) return '';
+    if (p.color) s = `<span style="color:#${p.color}">${s}</span>`;
+    if (p.bold) s = `<strong>${s}</strong>`;
+    if (p.italic) s = `<em>${s}</em>`;
+    if (p.underline) s = `<u>${s}</u>`;
+    return s;
+  }).join('');
+  const alignStyle = align ? ` style="text-align:${align}"` : '';
+  return `<p${alignStyle}>${inner}</p>`;
 }
 
 function contentToHtml(content, title) {
@@ -428,28 +444,40 @@ function contentToHtml(content, title) {
       if (!text) continue;
       const level = HEADING_MAP[block.style];
       if (level) {
-        parts.push(`<h${level}>${escHtml(text)}</h${level}>`);
+        // 헤딩은 <p> 래퍼 제거 후 <hN>으로
+        const inner = block.html
+          ? block.html.replace(/^<p[^>]*>/, '').replace(/<\/p>$/, '')
+          : escHtml(text);
+        parts.push(`<h${level}>${inner}</h${level}>`);
       } else {
-        const inner = renderText(block.text);
-        parts.push(`<p>${inner}</p>`);
+        parts.push(block.html ?? `<p>${renderText(block.text)}</p>`);
       }
     } else if (block.type === 'image') {
       parts.push(`<p><img src="${block.src}" style="max-width:100%;height:auto"></p>`);
     } else if (block.type === 'table' && block.cells.length > 0) {
-      const grid = {};
-      for (const c of block.cells) {
-        const k = `${c.row},${c.col}`;
-        grid[k] = (grid[k] || '') + c.text;
-      }
+      const cellMap = {};
+      for (const c of block.cells) cellMap[`${c.row},${c.col}`] = c;
+      const occupied = new Set();
       let rows = '';
       for (let r = 0; r < block.rows; r++) {
-        let cells = '';
+        let rowHtml = '';
         for (let c = 0; c < block.cols; c++) {
-          const val = renderText((grid[`${r},${c}`] || '').trim());
-          const tag = r === 0 ? 'th' : 'td';
-          cells += `<${tag}>${val}</${tag}>`;
+          const k = `${r},${c}`;
+          if (occupied.has(k)) continue;
+          const cell = cellMap[k];
+          if (!cell) { rowHtml += '<td></td>'; continue; }
+          const rs = cell.rowSpan || 1;
+          const cs = cell.colSpan || 1;
+          for (let dr = 0; dr < rs; dr++) {
+            for (let dc = 0; dc < cs; dc++) {
+              if (dr > 0 || dc > 0) occupied.add(`${r+dr},${c+dc}`);
+            }
+          }
+          const spanAttr = (rs > 1 ? ` rowspan="${rs}"` : '') + (cs > 1 ? ` colspan="${cs}"` : '');
+          const cellContent = cell.html || renderText((cell.text || '').trim());
+          rowHtml += `<td${spanAttr}>${cellContent}</td>`;
         }
-        rows += `<tr>${cells}</tr>`;
+        rows += `<tr>${rowHtml}</tr>`;
       }
       parts.push(`<table>${rows}</table>`);
     }
@@ -661,7 +689,7 @@ function _processPara(pEl, styles, content, binMap = {}) {
     return;
   }
   const styleRef = pEl.getAttribute('styleIDRef') ?? '0';
-  const parts = _paraContent(pEl, binMap);
+  const { parts, align } = _paraContent(pEl, binMap);
 
   // parts가 이미지만 있는 경우 image 블록으로, 텍스트 포함 시 paragraph로
   const hasImg  = parts.some(p => p.type === 'image');
@@ -674,21 +702,54 @@ function _processPara(pEl, styles, content, binMap = {}) {
       if (p.type === 'image') content.push({ type: 'image', src: p.src });
     }
   } else {
-    // 텍스트에 이미지 마커 삽입
     const text = parts.map(p =>
       p.type === 'image' ? `\x02IMG:${p.src}\x03` : p.value
     ).join('');
-    content.push({ type: 'paragraph', text, style: styles[styleRef] ?? '' });
+    const html = _partsToHtml(parts, align);
+    content.push({ type: 'paragraph', text, html, style: styles[styleRef] ?? '' });
   }
 }
 
-// 단락 내 콘텐츠를 { type:'text', value } | { type:'image', src } 배열로 반환
+// 단락 내 콘텐츠를 { type:'text', value, bold?, italic?, underline?, color? } | { type:'image', src } 배열로 반환
+// { parts, align } 형태로 반환
 function _paraContent(pEl, binMap) {
+  let align = null;
+  for (const el of pEl.getElementsByTagName('*')) {
+    if (el.localName === 'paraPr') {
+      const alignEl = Array.from(el.children).find(c => c.localName === 'align');
+      if (alignEl) {
+        const v = alignEl.textContent?.trim().toLowerCase();
+        if (v === 'center' || v === 'right' || v === 'justify') align = v;
+      }
+      if (!align) {
+        const v = (el.getAttribute('align') || '').toLowerCase();
+        if (v === 'center' || v === 'right' || v === 'justify') align = v;
+      }
+      break;
+    }
+  }
+
   const parts = [];
   for (const el of pEl.getElementsByTagName('*')) {
     const ln = el.localName;
     if (ln === 't') {
-      parts.push({ type: 'text', value: el.textContent ?? '' });
+      const run = el.parentElement;
+      const fmt = {};
+      if (run && run.localName === 'run') {
+        const charPr = Array.from(run.children).find(c => c.localName === 'charPr');
+        if (charPr) {
+          if (charPr.getAttribute('bold') === '1') fmt.bold = true;
+          if (charPr.getAttribute('italic') === '1') fmt.italic = true;
+          if (charPr.getAttribute('underline') === '1') fmt.underline = true;
+          const color = charPr.getAttribute('fontColor') ||
+                        charPr.getAttribute('textColor') ||
+                        charPr.getAttribute('color');
+          if (color && color !== '000000' && color !== '#000000') {
+            fmt.color = color.replace(/^#/, '');
+          }
+        }
+      }
+      parts.push({ type: 'text', value: el.textContent ?? '', ...fmt });
     } else if (ln === 'img' || ln === 'pic') {
       const ref = el.getAttribute('binaryItemIDRef') ||
                   el.getAttribute('itemIDRef') ||
@@ -697,7 +758,7 @@ function _paraContent(pEl, binMap) {
       if (src) parts.push({ type: 'image', src });
     }
   }
-  return parts;
+  return { parts, align };
 }
 
 function _paraText(pEl) {
@@ -710,23 +771,27 @@ function _paraText(pEl) {
 
 function _collectCellContent(el, binMap) {
   let text = '';
+  const htmlParts = [];
   const nestedTables = [];
   for (const child of el.children) {
     const ln = child.localName;
     if (ln === 'p') {
-      const line = _paraContent(child, binMap)
-        .map(pt => pt.type === 'image' ? `\x02IMG:${pt.src}\x03` : pt.value)
-        .join('');
-      if (line.trim()) text += (text ? '\n' : '') + line;
+      const { parts, align } = _paraContent(child, binMap);
+      const line = parts.map(pt => pt.type === 'image' ? `\x02IMG:${pt.src}\x03` : pt.value).join('');
+      if (line.trim()) {
+        text += (text ? '\n' : '') + line;
+        htmlParts.push(_partsToHtml(parts, align));
+      }
     } else if (ln === 'tbl') {
       nestedTables.push(child);
     } else {
-      const { text: t, nestedTables: nt } = _collectCellContent(child, binMap);
+      const { text: t, html: h, nestedTables: nt } = _collectCellContent(child, binMap);
       if (t) text += (text ? '\n' : '') + t;
+      if (h) htmlParts.push(h);
       nestedTables.push(...nt);
     }
   }
-  return { text, nestedTables };
+  return { text, html: htmlParts.join(''), nestedTables };
 }
 
 function _processTable(tblEl, styles, content, binMap = {}) {
@@ -745,14 +810,16 @@ function _processTable(tblEl, styles, content, binMap = {}) {
     Array.from(tr.children)
       .filter(c => c.localName === 'tc')
       .forEach((tc, ci) => {
-        const addr = Array.from(tc.children).find(c => c.localName === 'cellAddr');
+        const addr = Array.from(tc.getElementsByTagName('*')).find(c => c.localName === 'cellAddr');
         const row = addr ? parseInt(addr.getAttribute('r') ?? ri) : ri;
         const col = addr ? parseInt(addr.getAttribute('c') ?? ci) : ci;
+        const rowSpan = addr ? (parseInt(addr.getAttribute('rowSpan') || addr.getAttribute('rowspan') || '1') || 1) : 1;
+        const colSpan = addr ? (parseInt(addr.getAttribute('colSpan') || addr.getAttribute('colspan') || '1') || 1) : 1;
 
         // <subList> 같은 래퍼를 재귀 탐색하여 <p> 텍스트 수집, <tbl>은 별도 처리
-        const { text: cellText, nestedTables } = _collectCellContent(tc, binMap);
+        const { text: cellText, html: cellHtml, nestedTables } = _collectCellContent(tc, binMap);
 
-        table.cells.push({ row, col, text: cellText });
+        table.cells.push({ row, col, rowSpan, colSpan, text: cellText, html: cellHtml });
 
         // 중첩 테이블은 content 에 별도 블록으로 추가
         for (const nested of nestedTables) {
