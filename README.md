@@ -1,6 +1,6 @@
 # I don't need HWP
 
-> 한글 문서(.hwp)를 AI와 웹 환경에서 바로 쓸 수 있게 변환하는 도구
+> 한글 문서(.hwp / .hwpx)를 AI와 웹 환경에서 바로 쓸 수 있게 변환하는 도구
 
 관공서의 HWP 파일, 이제 설치 없이 브라우저에서 바로 HTML로 변환하세요.  
 Google Docs 임포트도, AI 프롬프트 입력도 한 번에.
@@ -50,7 +50,7 @@ Google Docs 임포트도, AI 프롬프트 입력도 한 번에.
 
 ```
 1. index.html 더블클릭
-2. HWP 파일 드래그앤드롭
+2. HWP / HWPX 파일 드래그앤드롭
 3. HTML 다운로드
 4. Google Drive 업로드 → 파일 우클릭 → "Google 문서로 열기"
 ```
@@ -91,11 +91,19 @@ python cli.py 공문서.hwp -f json
 
 ## 지원 범위
 
-- **HWP 5.0** — OLE 바이너리, zlib 압축/비압축
-- **HWPX** — ZIP/XML 기반 (진행 중)
-- 제목·개요 스타일 → HTML 헤딩 자동 변환
-- 표 → HTML `<table>` / 마크다운 파이프 테이블 인라인 렌더링
-- 암호화 파일 미지원
+| 항목 | HWP 5.0 | HWPX |
+|---|---|---|
+| 텍스트 추출 | ✅ | ✅ |
+| 표 (병합 셀 포함) | ✅ | ✅ |
+| 이미지 | ✅ | ✅ |
+| 굵기·기울임·밑줄 | — | ✅ |
+| 글자 색상 | — | ✅ |
+| 단락 정렬 | — | ✅ |
+| 제목·개요 → HTML 헤딩 | ✅ | ✅ |
+| 암호화 파일 | ❌ | ❌ |
+
+> HWP 5.0은 바이너리 포맷 특성상 글자 서식 복원이 제한적입니다.  
+> 서식 보존이 중요하다면 HWPX(한글 2010 이상에서 저장 가능)를 권장합니다.
 
 ---
 
@@ -106,20 +114,13 @@ index.html        브라우저 앱 (cfb.js + 순수 JS, 설치 불필요)
 hwp_parser.py     Python 파서 라이브러리
 cli.py            커맨드라인 인터페이스
 requirements.txt  의존성 (olefile)
-samples/          표 추출 검증용 샘플 데이터
 ```
-
-### 표 추출 검증 샘플
-
-- `samples/table_validation_sample.json`  
-  테이블 셀 순서가 `(0,0)`부터 자연스럽게 매핑되는지, 그리고 `rows * cols`를 넘는
-  `LIST_HEADER`가 무시되는지 확인하기 위한 검증 샘플입니다.
 
 ---
 
 ## 기술 스택
 
-- **브라우저**: [`cfb.js`](https://github.com/SheetJS/js-cfb) (OLE 파싱) · 브라우저 네이티브 `DecompressionStream` (deflate-raw)
+- **브라우저**: [`cfb.js`](https://github.com/SheetJS/js-cfb) (OLE 파싱) · [`JSZip`](https://stuk.github.io/jszip/) (HWPX ZIP 해제) · 브라우저 네이티브 `DecompressionStream` (deflate-raw)
 - **Python**: [`olefile`](https://olefile.readthedocs.io/) · 표준 라이브러리 (`zlib`, `struct`)
 
 ---
