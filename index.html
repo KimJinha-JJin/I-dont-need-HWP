@@ -360,9 +360,9 @@ function parseSection(buf, styles, images = []) {
         text = text.replace(/\x1E/g, '[이미지]');
       }
 
-      if (ctx) {
+      if (ctx && ctx.cell) {
         ctx.cell.text += text;
-      } else {
+      } else if (!ctx) {
         content.push({ type: 'paragraph', text, style: styles[currentStyleIdx] || '' });
       }
 
@@ -628,7 +628,7 @@ async function parseHwpx(arrayBuffer) {
   return { content, version: 'HWPX' };
 }
 
-// <p> 요소가 <tbl>/<tc> 안에 있는지 확인
+// <p> 요소가 <tbl>/<tc> 안에 있는지 확인 (레거시 — 더 이상 호출되지 않음)
 function _isInsideTable(el, root) {
   let p = el.parentElement;
   while (p && p !== root) {
@@ -639,18 +639,20 @@ function _isInsideTable(el, root) {
 }
 
 function _parseSectionXml(root, styles, content, binMap = {}) {
-  // 직접 자식만 보면 wrapper 요소 안의 단락을 놓침
-  // 섹션 내 모든 <p> 를 순회하되, <tbl>/<tc> 안에 있는 것은 제외
-  // (table 안의 <p>는 _processTable 에서 별도 처리)
-  for (const el of root.getElementsByTagName('*')) {
-    if (el.localName === 'p' && !_isInsideTable(el, root)) {
-      _processPara(el, styles, content, binMap);
+  for (const child of root.children) {
+    const ln = child.localName;
+    if (ln === 'p') {
+      _processPara(child, styles, content, binMap);
+    } else if (ln === 'tbl') {
+      _processTable(child, styles, content, binMap);
+    } else {
+      _parseSectionXml(child, styles, content, binMap);
     }
   }
 }
 
 function _processPara(pEl, styles, content, binMap = {}) {
-  const tblChild = Array.from(pEl.children).find(c => c.localName === 'tbl');
+  const tblChild = Array.from(pEl.getElementsByTagName('*')).find(e => e.localName === 'tbl');
   if (tblChild) {
     _processTable(tblChild, styles, content, binMap);
     return;
