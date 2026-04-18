@@ -30,19 +30,14 @@ formats:
     parser.add_argument('input', help='HWP or HWPX file path')
     parser.add_argument(
         '-f', '--format',
-        choices=['markdown', 'text', 'json'],
+        choices=['markdown', 'text', 'json', 'llm'],
         default='markdown',
         dest='fmt',
-        help='Output format (default: markdown)',
+        help='Output format (default: markdown). llm = compact XML-tagged format for LLM prompts',
     )
     parser.add_argument(
         '-o', '--output',
         help='Write output to file instead of stdout',
-    )
-    parser.add_argument(
-        '--tables',
-        action='store_true',
-        help='Append extracted tables at the end (markdown format only)',
     )
     parser.add_argument(
         '--version',
@@ -70,12 +65,10 @@ formats:
         output = doc.to_text()
     elif args.fmt == 'json':
         output = json.dumps(doc.to_json(), ensure_ascii=False, indent=2)
+    elif args.fmt == 'llm':
+        output = doc.to_llm_text()
     else:
         output = doc.to_markdown()
-        if args.tables and doc.tables:
-            table_md = '\n\n'.join(t.to_markdown() for t in doc.tables if t.cells)
-            if table_md:
-                output += '\n\n---\n\n## 표 (Tables)\n\n' + table_md
 
     if args.output:
         Path(args.output).write_text(output, encoding='utf-8')

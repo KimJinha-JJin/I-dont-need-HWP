@@ -8,10 +8,9 @@ tag ID, nesting level, and payload size.
 
 import struct
 import zlib
-import io
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Union
 import olefile
 
 
@@ -20,41 +19,20 @@ import olefile
 # ---------------------------------------------------------------------------
 HWPTAG_BEGIN = 16
 
-# BodyText record tags
-TAG_PARA_HEADER     = HWPTAG_BEGIN + 50   # 66  0x42
-TAG_PARA_TEXT       = HWPTAG_BEGIN + 51   # 67  0x43
-TAG_PARA_CHAR_SHAPE = HWPTAG_BEGIN + 52   # 68  0x44
-TAG_PARA_LINE_SEG   = HWPTAG_BEGIN + 53   # 69  0x45
-TAG_CTRL_HEADER     = HWPTAG_BEGIN + 54   # 70  0x46
-TAG_LIST_HEADER     = HWPTAG_BEGIN + 55   # 71  0x47
-TAG_PAGE_DEF        = HWPTAG_BEGIN + 56   # 72  0x48
-TAG_FOOTNOTE_SHAPE  = HWPTAG_BEGIN + 57   # 73
-TAG_PAGE_BORDER_FILL = HWPTAG_BEGIN + 58  # 74
-TAG_SHAPE_COMPONENT = HWPTAG_BEGIN + 59   # 75
-TAG_TABLE           = HWPTAG_BEGIN + 60   # 76  0x4C
-TAG_PARA_NUM        = HWPTAG_BEGIN + 62   # 78
+TAG_PARA_HEADER      = HWPTAG_BEGIN + 50   # 66
+TAG_PARA_TEXT        = HWPTAG_BEGIN + 51   # 67
+TAG_PARA_CHAR_SHAPE  = HWPTAG_BEGIN + 52   # 68
+TAG_PARA_LINE_SEG    = HWPTAG_BEGIN + 53   # 69
+TAG_CTRL_HEADER      = HWPTAG_BEGIN + 54   # 70
+TAG_LIST_HEADER      = HWPTAG_BEGIN + 55   # 71
+TAG_TABLE            = HWPTAG_BEGIN + 60   # 76
+TAG_STYLE            = HWPTAG_BEGIN + 10   # 26
 
-# DocInfo record tags
-TAG_DOCUMENT_PROPERTIES = HWPTAG_BEGIN + 0   # 16
-TAG_ID_MAPPINGS         = HWPTAG_BEGIN + 1   # 17
-TAG_BIN_DATA            = HWPTAG_BEGIN + 2   # 18
-TAG_FACE_NAME           = HWPTAG_BEGIN + 3   # 19
-TAG_BORDER_FILL         = HWPTAG_BEGIN + 4   # 20
-TAG_CHAR_SHAPE          = HWPTAG_BEGIN + 5   # 21
-TAG_TAB_DEF             = HWPTAG_BEGIN + 6   # 22
-TAG_NUMBERING           = HWPTAG_BEGIN + 7   # 23
-TAG_BULLET              = HWPTAG_BEGIN + 8   # 24
-TAG_PARA_SHAPE          = HWPTAG_BEGIN + 9   # 25
-TAG_STYLE               = HWPTAG_BEGIN + 10  # 26
-
-# Inline control character codes (in paragraph text words)
-# Chars 0x01-0x1F that are NOT 0x09/0x0A/0x0D are inline objects
-# Each inline object = 1 control word + 7 extra words = 16 bytes total
-INLINE_CTRL_EXTRA_WORDS = 7
+# Inline control characters inside paragraph text words
 SPECIAL_CTRL_TAB        = 0x09
 SPECIAL_CTRL_LINE_BREAK = 0x0A
 SPECIAL_CTRL_PARA_BREAK = 0x0D
-CTRL_TABLE              = 0x1D  # Inline table placeholder
+INLINE_CTRL_EXTRA_WORDS = 7   # non-special ctrl chars carry 7 extra words
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +47,6 @@ class Record:
 
 
 def _read_record(buf: bytes, offset: int):
-    """Return (Record, new_offset) or (None, offset) at end of buffer."""
     if offset + 4 > len(buf):
         return None, offset
 
@@ -100,134 +77,46 @@ def iter_records(buf: bytes) -> Iterator[Record]:
 
 
 # ---------------------------------------------------------------------------
-# FileHeader parsing
+# FileHeader
 # ---------------------------------------------------------------------------
-
-FILE_HEADER_SIGNATURE = b'HWP Document File\x00'
 
 @dataclass
 class FileHeader:
-    version: tuple        # (major, minor, micro, build)
+    version: tuple
     compressed: bool
     encrypted: bool
-    distribution: bool
-    has_script: bool
-    drm: bool
-    xml_template: bool
-    has_history: bool
 
 
 def _parse_file_header(data: bytes) -> FileHeader:
-    # Signature: 32 bytes, Version: 4 bytes (each 1 byte: build, micro, minor, major)
-    # Wait: stored as little-endian DWORD so bytes are build, micro, minor, major
-    if len(data) < 40:
-        raise ValueError('FileHeader too short')
+    if len(data) < 40 or not data[:17].startswith(b'HWP Document File'):
+        raise HwpParseError('Not a valid HWP file (bad signature)')
 
-    sig = data[:len(FILE_HEADER_SIGNATURE)]
-    if not sig.startswith(b'HWP Document File'):
-        raise ValueError(f'Not a valid HWP file (bad signature)')
-
-    # Version is stored at offset 32, 4 bytes
     ver_bytes = data[32:36]
-    ver = (ver_bytes[3], ver_bytes[2], ver_bytes[1], ver_bytes[0])  # major.minor.micro.build
-
-    # Flags DWORD at offset 36
+    version = (ver_bytes[3], ver_bytes[2], ver_bytes[1], ver_bytes[0])
     flags = struct.unpack_from('<I', data, 36)[0]
 
     return FileHeader(
-        version=ver,
-        compressed=bool(flags & (1 << 0)),
-        encrypted=bool(flags & (1 << 1)),
-        distribution=bool(flags & (1 << 2)),
-        has_script=bool(flags & (1 << 3)),
-        drm=bool(flags & (1 << 4)),
-        xml_template=bool(flags & (1 << 5)),
-        has_history=bool(flags & (1 << 6)),
+        version=version,
+        compressed=bool(flags & 1),
+        encrypted=bool(flags & 2),
     )
 
 
 # ---------------------------------------------------------------------------
-# Paragraph text extraction
+# Document model: unified ordered content
 # ---------------------------------------------------------------------------
 
-def _extract_para_text(data: bytes) -> str:
-    """
-    Parse a HWPTAG_PARA_TEXT payload.
+@dataclass
+class Paragraph:
+    text: str
+    style_name: str = ''
 
-    Characters are UTF-16LE words. Control chars (0x01-0x1F) that are not
-    tab/newline are inline objects occupying 8 words total (1 ctrl + 7 extra).
-    """
-    chars = []
-    i = 0
-    while i + 1 < len(data):
-        code = struct.unpack_from('<H', data, i)[0]
-        i += 2
-
-        if code == SPECIAL_CTRL_PARA_BREAK:
-            chars.append('\n')
-        elif code == SPECIAL_CTRL_LINE_BREAK:
-            chars.append('\n')
-        elif code == SPECIAL_CTRL_TAB:
-            chars.append('\t')
-        elif 0x01 <= code <= 0x1F:
-            # Inline object: skip the 7 remaining extra words
-            i += INLINE_CTRL_EXTRA_WORDS * 2
-        else:
-            chars.append(chr(code))
-
-    return ''.join(chars)
-
-
-# ---------------------------------------------------------------------------
-# Style name extraction from DocInfo
-# ---------------------------------------------------------------------------
-
-def _parse_styles(doc_info_buf: bytes) -> dict:
-    """Return {style_index: style_name} from DocInfo records."""
-    styles = {}
-    idx = 0
-    for rec in iter_records(doc_info_buf):
-        if rec.tag == TAG_STYLE:
-            # Style record: LocalName (Pascal-style length-prefixed UTF-16LE string)
-            # at offset 0: WORD name_len, then name_len*2 bytes for name
-            # then WORD eng_name_len, eng_name
-            if len(rec.data) >= 2:
-                name_len = struct.unpack_from('<H', rec.data, 0)[0]
-                name_end = 2 + name_len * 2
-                if name_end <= len(rec.data):
-                    name = rec.data[2:name_end].decode('utf-16-le', errors='replace')
-                    styles[idx] = name
-            idx += 1
-    return styles
-
-
-# ---------------------------------------------------------------------------
-# Para header — carries the style index
-# ---------------------------------------------------------------------------
-
-def _para_style_index(para_header_data: bytes) -> int:
-    """Extract style index from HWPTAG_PARA_HEADER payload."""
-    # offset 0: WORD instId (chars in para)
-    # offset 2: WORD charShapeCount
-    # offset 4: WORD rangeTagCount
-    # offset 6: WORD lineCount
-    # offset 8: WORD styleIndex (lower 8 bits)
-    if len(para_header_data) >= 10:
-        style_byte = para_header_data[9]  # high byte has heading level etc.
-        style_index = para_header_data[8]  # low byte is style index
-        return style_index
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# Table extraction
-# ---------------------------------------------------------------------------
 
 @dataclass
 class Cell:
     row: int
     col: int
-    text: str
+    text: str = ''
 
 
 @dataclass
@@ -242,209 +131,261 @@ class Table:
 
         grid: dict = {}
         for c in self.cells:
-            grid[(c.row, c.col)] = c.text.replace('\n', ' ').strip()
+            key = (c.row, c.col)
+            grid[key] = grid.get(key, '') + c.text.replace('\n', ' ').strip()
 
         lines = []
         for r in range(self.rows):
-            row_cells = [grid.get((r, c), '') for c in range(self.cols)]
-            lines.append('| ' + ' | '.join(row_cells) + ' |')
+            row_vals = [grid.get((r, c), '') for c in range(self.cols)]
+            lines.append('| ' + ' | '.join(row_vals) + ' |')
             if r == 0:
                 lines.append('| ' + ' | '.join(['---'] * self.cols) + ' |')
-
         return '\n'.join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Document model
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Paragraph:
-    text: str
-    style_name: str = ''
+# Content is an ordered sequence of paragraphs and tables
+Block = Union[Paragraph, Table]
 
 
 @dataclass
 class HwpDocument:
     version: tuple
-    paragraphs: List[Paragraph]
-    tables: List[Table]
+    content: List[Block]  # paragraphs and tables in document reading order
 
-    # Heading tag names used in Korean docs
-    _HEADING_STYLES = {
-        '제목',         # 제목 (Title)
-        '개요 1',       # Outline 1
-        '개요 2',       # Outline 2
-        '개요 3',       # Outline 3
-        '개요 4',
-        '개요 5',
-        '개요 6',
-        '개요 7',
-        '소제목',       # Sub-title
-        'Heading 1',
-        'Heading 2',
-        'Heading 3',
+    # Style names that map to heading levels
+    _HEADING_MAP = {
+        '제목': 1, 'Title': 1,
+        '소제목': 2,
+        '개요 1': 2, 'Heading 1': 2,
+        '개요 2': 3, 'Heading 2': 3,
+        '개요 3': 4, 'Heading 3': 4,
+        '개요 4': 5, 'Heading 4': 5,
+        '개요 5': 6, 'Heading 5': 6,
     }
 
     def to_text(self) -> str:
-        return '\n'.join(p.text for p in self.paragraphs if p.text.strip())
+        parts = []
+        for block in self.content:
+            if isinstance(block, Paragraph) and block.text.strip():
+                parts.append(block.text.strip())
+            elif isinstance(block, Table):
+                for cell in block.cells:
+                    if cell.text.strip():
+                        parts.append(cell.text.strip())
+        return '\n'.join(parts)
 
     def to_markdown(self) -> str:
-        lines = []
-        for p in self.paragraphs:
-            text = p.text.strip()
-            if not text:
-                continue
-            style = p.style_name
+        parts = []
+        for block in self.content:
+            if isinstance(block, Paragraph):
+                text = block.text.strip()
+                if not text:
+                    continue
+                level = self._HEADING_MAP.get(block.style_name)
+                if level:
+                    parts.append('#' * level + ' ' + text)
+                else:
+                    parts.append(text)
+            elif isinstance(block, Table):
+                md = block.to_markdown()
+                if md:
+                    parts.append(md)
+        return '\n\n'.join(parts)
 
-            # Map style names to markdown headings
-            if style == '제목' or style == 'Title':
-                lines.append(f'# {text}')
-            elif style in ('개요 1', 'Heading 1'):
-                lines.append(f'## {text}')
-            elif style in ('개요 2', 'Heading 2'):
-                lines.append(f'### {text}')
-            elif style in ('개요 3', 'Heading 3'):
-                lines.append(f'#### {text}')
-            elif style in ('소제목',):
-                lines.append(f'## {text}')
-            else:
-                lines.append(text)
-
-        return '\n\n'.join(lines)
+    def to_llm_text(self) -> str:
+        """
+        Compact format optimised for LLM context windows.
+        Headings use XML-style tags; tables are pipe-delimited.
+        """
+        parts = []
+        for block in self.content:
+            if isinstance(block, Paragraph):
+                text = block.text.strip()
+                if not text:
+                    continue
+                level = self._HEADING_MAP.get(block.style_name)
+                if level:
+                    tag = f'h{level}'
+                    parts.append(f'<{tag}>{text}</{tag}>')
+                else:
+                    parts.append(text)
+            elif isinstance(block, Table):
+                md = block.to_markdown()
+                if md:
+                    parts.append(md)
+        return '\n'.join(parts)
 
     def to_json(self) -> dict:
-        return {
-            'version': '.'.join(str(v) for v in self.version),
-            'paragraphs': [
-                {'text': p.text, 'style': p.style_name}
-                for p in self.paragraphs
-            ],
-            'tables': [
-                {
-                    'rows': t.rows,
-                    'cols': t.cols,
+        blocks = []
+        for block in self.content:
+            if isinstance(block, Paragraph):
+                blocks.append({
+                    'type': 'paragraph',
+                    'style': block.style_name,
+                    'text': block.text,
+                })
+            elif isinstance(block, Table):
+                blocks.append({
+                    'type': 'table',
+                    'rows': block.rows,
+                    'cols': block.cols,
                     'cells': [
                         {'row': c.row, 'col': c.col, 'text': c.text}
-                        for c in t.cells
+                        for c in block.cells
                     ],
-                }
-                for t in self.tables
-            ],
+                })
+        return {
+            'version': '.'.join(str(v) for v in self.version),
+            'content': blocks,
         }
 
 
 # ---------------------------------------------------------------------------
-# Section parser (BodyText/Section*)
+# Style extraction from DocInfo
 # ---------------------------------------------------------------------------
 
-def _parse_section(buf: bytes, styles: dict) -> tuple:
+def _parse_styles(doc_info_buf: bytes) -> dict:
+    """Return {style_index: name} from DocInfo TAG_STYLE records."""
+    styles = {}
+    idx = 0
+    for rec in iter_records(doc_info_buf):
+        if rec.tag == TAG_STYLE:
+            if len(rec.data) >= 2:
+                name_len = struct.unpack_from('<H', rec.data, 0)[0]
+                end = 2 + name_len * 2
+                if end <= len(rec.data):
+                    name = rec.data[2:end].decode('utf-16-le', errors='replace')
+                    styles[idx] = name
+            idx += 1
+    return styles
+
+
+# ---------------------------------------------------------------------------
+# Paragraph text extraction
+# ---------------------------------------------------------------------------
+
+def _extract_para_text(data: bytes) -> str:
     """
-    Parse a decompressed section buffer.
-    Returns (paragraphs, tables).
+    Parse a TAG_PARA_TEXT payload (UTF-16LE words).
+    Control chars 0x01-0x1F that are not tab/newline are inline objects
+    occupying 8 words total (1 ctrl + 7 extra).
     """
-    paragraphs: List[Paragraph] = []
-    tables: List[Table] = []
+    chars = []
+    i = 0
+    while i + 1 < len(data):
+        code = struct.unpack_from('<H', data, i)[0]
+        i += 2
+
+        if code == SPECIAL_CTRL_PARA_BREAK or code == SPECIAL_CTRL_LINE_BREAK:
+            chars.append('\n')
+        elif code == SPECIAL_CTRL_TAB:
+            chars.append('\t')
+        elif 0x01 <= code <= 0x1F:
+            i += INLINE_CTRL_EXTRA_WORDS * 2  # skip inline object payload
+        else:
+            chars.append(chr(code))
+
+    return ''.join(chars)
+
+
+def _para_style_index(data: bytes) -> int:
+    """Extract style index byte from TAG_PARA_HEADER payload."""
+    return data[8] if len(data) >= 10 else 0
+
+
+# ---------------------------------------------------------------------------
+# Section parser — preserves document order
+# ---------------------------------------------------------------------------
+
+def _parse_section(buf: bytes, styles: dict) -> List[Block]:
+    """
+    Parse a decompressed section buffer and return content blocks in order.
+
+    State machine:
+    - Outside table: TAG_PARA_TEXT → Paragraph appended to content
+    - Inside table cell (TAG_LIST_HEADER seen): text accumulates into Cell
+    - TAG_TABLE marks start of a new Table block
+    """
+    content: List[Block] = []
 
     current_style_idx = 0
-    current_table: Optional[Table] = None
-    table_row = 0
-    table_col = 0
-    inside_table_cell = False
+    current_table: Table | None = None
+    current_cell: Cell | None = None
+    table_row = -1
+    table_col = -1
+    # Track nesting level to know when we exit a table's cell lists
+    table_list_level: int | None = None
 
-    records = list(iter_records(buf))
-    i = 0
-
-    while i < len(records):
-        rec = records[i]
-
+    for rec in iter_records(buf):
         if rec.tag == TAG_PARA_HEADER:
             current_style_idx = _para_style_index(rec.data)
 
         elif rec.tag == TAG_PARA_TEXT:
             text = _extract_para_text(rec.data)
-            style_name = styles.get(current_style_idx, '')
-            if inside_table_cell and current_table is not None:
-                # Append to current table cell
-                current_table.cells[-1].text += text
+            if current_cell is not None:
+                # Accumulate text into the current table cell
+                current_cell.text += text
             else:
-                paragraphs.append(Paragraph(text=text, style_name=style_name))
+                current_table = None  # leaving table context
+                content.append(Paragraph(
+                    text=text,
+                    style_name=styles.get(current_style_idx, ''),
+                ))
 
         elif rec.tag == TAG_TABLE:
-            # Table record: offset 0 DWORD flags, offset 4 WORD rows, offset 6 WORD cols
             if len(rec.data) >= 8:
                 rows = struct.unpack_from('<H', rec.data, 4)[0]
                 cols = struct.unpack_from('<H', rec.data, 6)[0]
                 current_table = Table(rows=rows, cols=cols)
-                tables.append(current_table)
+                content.append(current_table)
                 table_row = -1
                 table_col = -1
-                inside_table_cell = False
+                current_cell = None
+                table_list_level = rec.level
 
-        elif rec.tag == TAG_LIST_HEADER:
-            # List header marks the start of a table cell list
-            if current_table is not None:
-                table_col += 1
-                if table_col >= current_table.cols:
-                    table_col = 0
-                    table_row += 1
-                current_table.cells.append(Cell(row=table_row, col=table_col, text=''))
-                inside_table_cell = True
+        elif rec.tag == TAG_LIST_HEADER and current_table is not None:
+            # Each TAG_LIST_HEADER at the expected nesting level is a cell
+            table_col += 1
+            if table_col >= current_table.cols:
+                table_col = 0
+                table_row += 1
+            current_cell = Cell(row=table_row, col=table_col)
+            current_table.cells.append(current_cell)
 
-        i += 1
-
-    return paragraphs, tables
+    return content
 
 
 # ---------------------------------------------------------------------------
-# HWPX (XML-based HWP) support
+# HWPX (ZIP/XML) support
 # ---------------------------------------------------------------------------
 
 def _parse_hwpx(path: Path) -> HwpDocument:
-    """Parse HWPX format (ZIP with XML files)."""
     import zipfile
     from xml.etree import ElementTree as ET
 
-    paragraphs = []
-    tables = []
-
-    # HWPX namespace
-    NS = {
-        'hh': 'http://www.hancom.co.kr/hwpml/2011/paragraph',
-        'hp': 'http://www.hancom.co.kr/hwpml/2011/paragraph',
-        'hs': 'http://www.hancom.co.kr/hwpml/2011/section',
-        'ha': 'http://www.hancom.co.kr/hwpml/2011/hh',
-    }
+    content: List[Block] = []
 
     with zipfile.ZipFile(path) as zf:
-        names = zf.namelist()
-        # Body section files follow the pattern Contents/section*.xml
         section_files = sorted(
-            n for n in names
+            n for n in zf.namelist()
             if n.startswith('Contents/') and n.endswith('.xml') and 'section' in n.lower()
         )
-
         for sf in section_files:
-            xml_data = zf.read(sf)
             try:
-                root = ET.fromstring(xml_data)
+                root = ET.fromstring(zf.read(sf))
             except ET.ParseError:
                 continue
-
-            # Extract all text nodes
             for elem in root.iter():
                 if elem.tag.endswith('}t') or elem.tag == 't':
                     text = (elem.text or '') + (elem.tail or '')
                     if text.strip():
-                        paragraphs.append(Paragraph(text=text, style_name=''))
-                elif elem.tag.endswith('}run') or elem.tag.endswith('}Run'):
-                    pass  # text already captured via 't' children
+                        content.append(Paragraph(text=text))
 
-    return HwpDocument(version=(0, 0, 0, 0), paragraphs=paragraphs, tables=tables)
+    return HwpDocument(version=(0, 0, 0, 0), content=content)
 
 
 # ---------------------------------------------------------------------------
-# Main public API
+# Public API
 # ---------------------------------------------------------------------------
 
 class HwpParseError(Exception):
@@ -455,63 +396,52 @@ def parse(filepath) -> HwpDocument:
     """
     Parse an HWP or HWPX file and return an HwpDocument.
 
-    Supports:
-    - HWP 5.0 (OLE binary, compressed or uncompressed)
-    - HWPX (ZIP/XML)
+    Raises:
+        FileNotFoundError: if the file does not exist
+        HwpParseError: if the file is not a valid or supported HWP/HWPX file
     """
     path = Path(filepath)
     if not path.exists():
         raise FileNotFoundError(f'File not found: {path}')
 
-    # HWPX detection: it's a ZIP file
     with open(path, 'rb') as f:
         magic = f.read(4)
 
     if magic == b'PK\x03\x04':
         return _parse_hwpx(path)
 
-    # HWP 5.0 (OLE)
     if not olefile.isOleFile(str(path)):
         raise HwpParseError(f'Not a valid HWP/HWPX file: {path}')
 
     ole = olefile.OleFileIO(str(path))
     try:
-        return _parse_hwp5(ole, path)
+        return _parse_hwp5(ole)
     finally:
         ole.close()
 
 
-def _parse_hwp5(ole: olefile.OleFileIO, path: Path) -> HwpDocument:
-    # ---- FileHeader ----
+def _parse_hwp5(ole: olefile.OleFileIO) -> HwpDocument:
     if not ole.exists('FileHeader'):
         raise HwpParseError('Missing FileHeader stream')
 
-    header_data = ole.openstream('FileHeader').read()
-    try:
-        file_header = _parse_file_header(header_data)
-    except ValueError as e:
-        raise HwpParseError(str(e))
+    header = _parse_file_header(ole.openstream('FileHeader').read())
 
-    if file_header.encrypted:
+    if header.encrypted:
         raise HwpParseError('Encrypted HWP files are not supported')
 
-    compressed = file_header.compressed
+    compressed = header.compressed
 
-    # ---- DocInfo → styles ----
     styles: dict = {}
     if ole.exists('DocInfo'):
-        doc_info_raw = ole.openstream('DocInfo').read()
+        raw = ole.openstream('DocInfo').read()
         if compressed:
             try:
-                doc_info_raw = zlib.decompress(doc_info_raw, -15)
+                raw = zlib.decompress(raw, -15)
             except zlib.error:
-                pass  # try uncompressed
-        styles = _parse_styles(doc_info_raw)
+                pass
+        styles = _parse_styles(raw)
 
-    # ---- BodyText sections ----
-    all_paragraphs: List[Paragraph] = []
-    all_tables: List[Table] = []
-
+    all_content: List[Block] = []
     section_num = 0
     while ole.exists(f'BodyText/Section{section_num}'):
         raw = ole.openstream(f'BodyText/Section{section_num}').read()
@@ -520,21 +450,15 @@ def _parse_hwp5(ole: olefile.OleFileIO, path: Path) -> HwpDocument:
                 raw = zlib.decompress(raw, -15)
             except zlib.error:
                 pass
-        paras, tables = _parse_section(raw, styles)
-        all_paragraphs.extend(paras)
-        all_tables.extend(tables)
+        all_content.extend(_parse_section(raw, styles))
         section_num += 1
 
-    # ---- Fallback: use PrvText if no body text was found ----
-    if not all_paragraphs and ole.exists('PrvText'):
+    # Fallback: PrvText preview stream (loses structure but better than nothing)
+    if not all_content and ole.exists('PrvText'):
         prv = ole.openstream('PrvText').read()
         text = prv.decode('utf-16-le', errors='replace')
         for line in text.splitlines():
             if line.strip():
-                all_paragraphs.append(Paragraph(text=line, style_name=''))
+                all_content.append(Paragraph(text=line))
 
-    return HwpDocument(
-        version=file_header.version,
-        paragraphs=all_paragraphs,
-        tables=all_tables,
-    )
+    return HwpDocument(version=header.version, content=all_content)
