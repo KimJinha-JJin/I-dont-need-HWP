@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HWP → HTML 변환기</title>
+  <script src="https://cdn.jsdelivr.net/npm/cfb@1/dist/cfb.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif;
+      background: #f1f5f9;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 16px;
+      color: #1e293b;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    header h1 { font-size: 1.75rem; font-weight: 700; color: #1e293b; }
+    header p  { margin-top: 6px; color: #64748b; font-size: 0.95rem; }
+
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 2px 16px rgba(0,0,0,.08);
+      width: 100%;
+      max-width: 680px;
+      padding: 32px;
+    }
+
+    /* ── Drop zone ── */
+    #dropzone {
+      border: 2px dashed #94a3b8;
+      border-radius: 12px;
+      padding: 48px 24px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+    }
+    #dropzone:hover, #dropzone.drag-over {
+      border-color: #2563eb;
+      background: #eff6ff;
+    }
+    #dropzone svg { color: #94a3b8; margin-bottom: 12px; }
+    #dropzone p.main { font-size: 1rem; font-weight: 600; color: #475569; }
+    #dropzone p.sub  { margin-top: 4px; font-size: 0.85rem; color: #94a3b8; }
+    #fileInput { display: none; }
+
+    /* ── Status ── */
+    #status {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      margin-top: 20px;
+      padding: 14px 18px;
+      border-radius: 10px;
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+    #status.loading { background: #eff6ff; color: #1d4ed8; display: flex; }
+    #status.error   { background: #fef2f2; color: #dc2626; display: flex; }
+    #status.success { background: #f0fdf4; color: #15803d; display: flex; }
+
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Result ── */
+    #result { display: none; margin-top: 24px; }
+
+    .meta-row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .meta-chip {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 6px 14px;
+      font-size: 0.82rem;
+      color: #475569;
+    }
+    .meta-chip strong { color: #1e293b; }
+
+    .preview-label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin-bottom: 8px;
+    }
+    #preview {
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      height: 300px;
+      overflow: auto;
+      background: #fff;
+    }
+    #preview iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }
+    button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: opacity .15s;
+    }
+    button:hover { opacity: .85; }
+    .btn-primary   { background: #2563eb; color: #fff; }
+    .btn-secondary { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+
+    .google-hint {
+      margin-top: 16px;
+      padding: 12px 16px;
+      background: #fafafa;
+      border-left: 3px solid #2563eb;
+      border-radius: 0 8px 8px 0;
+      font-size: 0.83rem;
+      color: #475569;
+      line-height: 1.6;
+    }
+    .google-hint strong { color: #1e293b; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>HWP → HTML 변환기</h1>
+  <p>설치 없이 브라우저에서 바로 변환 · 파일은 내 컴퓨터 안에서만 처리됩니다</p>
+</header>
+
+<div class="card">
+  <div id="dropzone" role="button" tabindex="0"
+       onclick="document.getElementById('fileInput').click()"
+       ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)"
+       onkeydown="if(event.key==='Enter'||event.key===' ')document.getElementById('fileInput').click()">
+    <svg width="48" height="48" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round"
+            d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/>
+    </svg>
+    <p class="main">HWP 파일을 여기에 드래그하거나 클릭해서 선택</p>
+    <p class="sub">HWP 5.0 · HWPX 지원</p>
+  </div>
+  <input type="file" id="fileInput" accept=".hwp,.hwpx" onchange="onFileSelected(event)">
+
+  <div id="status"></div>
+  <div id="result">
+    <div class="meta-row" id="metaRow"></div>
+    <div class="preview-label">미리보기</div>
+    <div id="preview"><iframe id="previewFrame" sandbox="allow-same-origin"></iframe></div>
+    <div class="actions">
+      <button class="btn-primary" onclick="downloadHtml()">
+        <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/>
+        </svg>
+        HTML 다운로드
+      </button>
+      <button class="btn-secondary" onclick="resetApp()">다른 파일 변환</button>
+    </div>
+    <div class="google-hint">
+      <strong>Google Docs로 가져오기:</strong><br>
+      다운로드한 HTML 파일을 Google Drive에 업로드 →
+      파일 우클릭 → <strong>"Google 문서로 열기"</strong>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ─────────────────────────────────────────────
+// HWP 태그 상수
+// ─────────────────────────────────────────────
+const TAG_PARA_HEADER = 66;
+const TAG_PARA_TEXT   = 67;
+const TAG_LIST_HEADER = 71;
+const TAG_TABLE       = 76;
+const TAG_STYLE       = 26;
+
+const HEADING_MAP = {
+  '제목': 1, 'Title': 1,
+  '소제목': 2,
+  '개요 1': 2, 'Heading 1': 2,
+  '개요 2': 3, 'Heading 2': 3,
+  '개요 3': 4, 'Heading 3': 4,
+  '개요 4': 5, 'Heading 4': 5,
+  '개요 5': 6, 'Heading 5': 6,
+};
+
+// ─────────────────────────────────────────────
+// 압축 해제 (deflate-raw = zlib wbits -15)
+// ─────────────────────────────────────────────
+async function decompressRaw(data) {
+  try {
+    const ds = new DecompressionStream('deflate-raw');
+    const writer = ds.writable.getWriter();
+    writer.write(data);
+    writer.close();
+
+    const chunks = [];
+    const reader = ds.readable.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+
+    const total = chunks.reduce((s, c) => s + c.length, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.length; }
+    return out;
+  } catch {
+    return data; // 압축 안 된 경우 그대로 반환
+  }
+}
+
+// ─────────────────────────────────────────────
+// 레코드 파싱
+// ─────────────────────────────────────────────
+function* iterRecords(buf) {
+  let i = 0;
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  while (i + 4 <= buf.length) {
+    const header = view.getUint32(i, true);
+    const tag    = header & 0x3FF;
+    let   size   = (header >> 14) & 0xFFF;
+    i += 4;
+    if (size === 0xFFF) {
+      if (i + 4 > buf.length) break;
+      size = view.getUint32(i, true);
+      i += 4;
+    }
+    const data = buf.slice(i, i + size);
+    i += size;
+    yield { tag, data };
+  }
+}
+
+// ─────────────────────────────────────────────
+// 스타일 이름 파싱 (DocInfo)
+// ─────────────────────────────────────────────
+function parseStyles(buf) {
+  const styles = {};
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let idx = 0;
+  for (const rec of iterRecords(buf)) {
+    if (rec.tag === TAG_STYLE && rec.data.length >= 2) {
+      const rv = new DataView(rec.data.buffer, rec.data.byteOffset, rec.data.byteLength);
+      const nameLen = rv.getUint16(0, true);
+      if (2 + nameLen * 2 <= rec.data.length) {
+        styles[idx] = new TextDecoder('utf-16le').decode(rec.data.slice(2, 2 + nameLen * 2));
+      }
+      idx++;
+    }
+  }
+  return styles;
+}
+
+// ─────────────────────────────────────────────
+// 단락 텍스트 추출
+// ─────────────────────────────────────────────
+function extractParaText(data) {
+  const chars = [];
+  for (let i = 0; i + 1 < data.length; i += 2) {
+    const rv = new DataView(data.buffer, data.byteOffset + i, 2);
+    const code = rv.getUint16(0, true);
+    if (code === 0x0D || code === 0x0A) {
+      chars.push('\n');
+    } else if (code === 0x09) {
+      chars.push('\t');
+    } else if (code >= 0x01 && code <= 0x1F) {
+      i += 14; // 인라인 오브젝트 7 words 스킵 (루프에서 +2 추가됨 → 총 16 bytes)
+    } else {
+      chars.push(String.fromCharCode(code));
+    }
+  }
+  return chars.join('');
+}
+
+// ─────────────────────────────────────────────
+// 섹션 파싱 (문서 순서 보존)
+// ─────────────────────────────────────────────
+function parseSection(buf, styles) {
+  const content = [];
+  let currentStyleIdx = 0;
+  let currentTable = null;
+  let currentCell  = null;
+  let tableRow = -1, tableCol = -1;
+
+  for (const rec of iterRecords(buf)) {
+    if (rec.tag === TAG_PARA_HEADER) {
+      currentStyleIdx = rec.data.length >= 10 ? rec.data[8] : 0;
+
+    } else if (rec.tag === TAG_PARA_TEXT) {
+      const text = extractParaText(rec.data);
+      if (currentCell !== null) {
+        currentCell.text += text;
+      } else {
+        currentTable = null;
+        content.push({ type: 'paragraph', text, style: styles[currentStyleIdx] || '' });
+      }
+
+    } else if (rec.tag === TAG_TABLE) {
+      if (rec.data.length >= 8) {
+        const rv = new DataView(rec.data.buffer, rec.data.byteOffset, rec.data.byteLength);
+        const rows = rv.getUint16(4, true);
+        const cols = rv.getUint16(6, true);
+        currentTable = { type: 'table', rows, cols, cells: [] };
+        content.push(currentTable);
+        tableRow = -1; tableCol = -1; currentCell = null;
+      }
+
+    } else if (rec.tag === TAG_LIST_HEADER && currentTable !== null) {
+      tableCol++;
+      if (tableCol >= currentTable.cols) { tableCol = 0; tableRow++; }
+      currentCell = { row: tableRow, col: tableCol, text: '' };
+      currentTable.cells.push(currentCell);
+    }
+  }
+  return content;
+}
+
+// ─────────────────────────────────────────────
+// HTML 렌더링
+// ─────────────────────────────────────────────
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function contentToHtml(content, title) {
+  const css = `
+    body{font-family:'Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR',sans-serif;
+         font-size:11pt;line-height:1.7;margin:40px auto;max-width:900px;color:#111}
+    h1{font-size:20pt;margin-top:1.5em}h2{font-size:16pt;margin-top:1.3em}
+    h3{font-size:13pt;margin-top:1.1em}h4,h5,h6{font-size:11pt;margin-top:.9em}
+    p{margin:.4em 0}
+    table{border-collapse:collapse;width:100%;margin:1em 0}
+    th,td{border:1px solid #555;padding:6px 10px;text-align:left;vertical-align:top}
+    th{background:#f0f0f0;font-weight:700}
+  `.trim();
+
+  const parts = [];
+  for (const block of content) {
+    if (block.type === 'paragraph') {
+      const text = block.text.trim();
+      if (!text) continue;
+      const level = HEADING_MAP[block.style];
+      if (level) {
+        parts.push(`<h${level}>${escHtml(text)}</h${level}>`);
+      } else {
+        const inner = escHtml(block.text).replace(/\n/g, '<br>');
+        parts.push(`<p>${inner}</p>`);
+      }
+    } else if (block.type === 'table' && block.cells.length > 0) {
+      const grid = {};
+      for (const c of block.cells) {
+        const k = `${c.row},${c.col}`;
+        grid[k] = (grid[k] || '') + c.text;
+      }
+      let rows = '';
+      for (let r = 0; r < block.rows; r++) {
+        let cells = '';
+        for (let c = 0; c < block.cols; c++) {
+          const val = escHtml((grid[`${r},${c}`] || '').trim()).replace(/\n/g,'<br>');
+          const tag = r === 0 ? 'th' : 'td';
+          cells += `<${tag}>${val}</${tag}>`;
+        }
+        rows += `<tr>${cells}</tr>`;
+      }
+      parts.push(`<table>${rows}</table>`);
+    }
+  }
+
+  return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>${escHtml(title)}</title>
+<style>${css}</style>
+</head>
+<body>
+${parts.join('\n')}
+</body>
+</html>`;
+}
+
+// ─────────────────────────────────────────────
+// 메인 파서
+// ─────────────────────────────────────────────
+async function parseHwp(arrayBuffer, filename) {
+  const bytes = new Uint8Array(arrayBuffer);
+
+  // HWPX는 ZIP 매직 바이트로 구분
+  if (bytes[0] === 0x50 && bytes[1] === 0x4B) {
+    return parseHwpx(arrayBuffer);
+  }
+
+  // cfb.js로 OLE 컨테이너 열기
+  const cfb = CFB.read(bytes, { type: 'array' });
+
+  // FileHeader 파싱
+  const hdrEntry = CFB.find(cfb, 'FileHeader');
+  if (!hdrEntry) throw new Error('FileHeader 스트림을 찾을 수 없습니다');
+
+  const hdrData = new Uint8Array(hdrEntry.content);
+  if (hdrData.length < 40) throw new Error('FileHeader가 너무 짧습니다');
+
+  const sig = new TextDecoder().decode(hdrData.slice(0, 17));
+  if (!sig.startsWith('HWP Document File')) throw new Error('유효한 HWP 파일이 아닙니다');
+
+  const flags      = new DataView(hdrData.buffer).getUint32(36, true);
+  const compressed = !!(flags & 1);
+  const encrypted  = !!(flags & 2);
+  const ver = hdrData.slice(32, 36);
+  const version = `${ver[3]}.${ver[2]}.${ver[1]}.${ver[0]}`;
+
+  if (encrypted) throw new Error('암호화된 파일은 지원하지 않습니다');
+
+  // DocInfo → 스타일 맵
+  let styles = {};
+  const docEntry = CFB.find(cfb, 'DocInfo');
+  if (docEntry) {
+    let buf = new Uint8Array(docEntry.content);
+    if (compressed) buf = await decompressRaw(buf);
+    styles = parseStyles(buf);
+  }
+
+  // BodyText/Section* 파싱
+  const content = [];
+  for (let i = 0; ; i++) {
+    const entry = CFB.find(cfb, `Section${i}`);
+    if (!entry) break;
+    let buf = new Uint8Array(entry.content);
+    if (compressed) buf = await decompressRaw(buf);
+    content.push(...parseSection(buf, styles));
+  }
+
+  // 폴백: PrvText (미리보기 텍스트 스트림)
+  if (content.length === 0) {
+    const prvEntry = CFB.find(cfb, 'PrvText');
+    if (prvEntry) {
+      const text = new TextDecoder('utf-16le').decode(new Uint8Array(prvEntry.content));
+      for (const line of text.split('\n')) {
+        if (line.trim()) content.push({ type: 'paragraph', text: line, style: '' });
+      }
+    }
+  }
+
+  return { content, version };
+}
+
+// ─────────────────────────────────────────────
+// HWPX (ZIP/XML) 파서
+// ─────────────────────────────────────────────
+async function parseHwpx(arrayBuffer) {
+  // JSZip 없이 ZIP 파싱은 복잡하므로 안내 메시지 반환
+  // TODO: JSZip CDN 추가 시 구현 가능
+  throw new Error('HWPX 형식은 아직 지원 준비 중입니다. .hwp 파일로 저장 후 시도해주세요.');
+}
+
+// ─────────────────────────────────────────────
+// UI 상태 관리
+// ─────────────────────────────────────────────
+let currentHtml = '';
+let currentFilename = '';
+
+function setStatus(type, message) {
+  const el = document.getElementById('status');
+  el.className = type;
+  el.style.display = type ? 'flex' : 'none';
+  el.innerHTML = type === 'loading'
+    ? `<div class="spinner"></div><span>${message}</span>`
+    : `<span>${message}</span>`;
+}
+
+function showResult(content, version, filename) {
+  const title = filename.replace(/\.hwpx?$/i, '');
+  currentHtml = contentToHtml(content, title);
+  currentFilename = title + '.html';
+
+  const paraCount  = content.filter(b => b.type === 'paragraph').length;
+  const tableCount = content.filter(b => b.type === 'table').length;
+
+  document.getElementById('metaRow').innerHTML = `
+    <div class="meta-chip">버전 <strong>${version}</strong></div>
+    <div class="meta-chip">단락 <strong>${paraCount}개</strong></div>
+    <div class="meta-chip">표 <strong>${tableCount}개</strong></div>
+  `;
+
+  const frame = document.getElementById('previewFrame');
+  frame.srcdoc = currentHtml;
+
+  document.getElementById('result').style.display = 'block';
+}
+
+function downloadHtml() {
+  const blob = new Blob([currentHtml], { type: 'text/html;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = currentFilename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function resetApp() {
+  document.getElementById('result').style.display = 'none';
+  document.getElementById('status').style.display = 'none';
+  document.getElementById('fileInput').value = '';
+  currentHtml = '';
+  currentFilename = '';
+}
+
+// ─────────────────────────────────────────────
+// 파일 처리
+// ─────────────────────────────────────────────
+async function processFile(file) {
+  if (!file) return;
+  if (!/\.(hwp|hwpx)$/i.test(file.name)) {
+    setStatus('error', '❌ HWP 또는 HWPX 파일만 지원합니다');
+    return;
+  }
+
+  document.getElementById('result').style.display = 'none';
+  setStatus('loading', `${file.name} 변환 중…`);
+
+  try {
+    const buf = await file.arrayBuffer();
+    const { content, version } = await parseHwp(buf, file.name);
+
+    if (content.length === 0) {
+      setStatus('error', '⚠️ 텍스트를 추출할 수 없었습니다. 파일이 손상되었거나 지원하지 않는 형식일 수 있습니다.');
+      return;
+    }
+
+    setStatus('success', `✅ 변환 완료 — ${file.name}`);
+    showResult(content, version, file.name);
+  } catch (e) {
+    setStatus('error', `❌ ${e.message}`);
+  }
+}
+
+// ─────────────────────────────────────────────
+// 드래그앤드롭 / 파일 선택
+// ─────────────────────────────────────────────
+function onDragOver(e) {
+  e.preventDefault();
+  document.getElementById('dropzone').classList.add('drag-over');
+}
+function onDragLeave() {
+  document.getElementById('dropzone').classList.remove('drag-over');
+}
+function onDrop(e) {
+  e.preventDefault();
+  document.getElementById('dropzone').classList.remove('drag-over');
+  processFile(e.dataTransfer.files[0]);
+}
+function onFileSelected(e) {
+  processFile(e.target.files[0]);
+}
+</script>
+</body>
+</html>
