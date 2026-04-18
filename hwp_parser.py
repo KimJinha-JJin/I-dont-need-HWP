@@ -215,6 +215,81 @@ class HwpDocument:
                     parts.append(md)
         return '\n'.join(parts)
 
+    def to_html(self, title: str = '') -> str:
+        """
+        Render the document as a standalone HTML file.
+
+        The output is designed for direct import into Google Docs:
+        - Heading tags (h1-h6) map to Google Docs Heading styles
+        - Tables use border styling so cells are visible after import
+        - UTF-8 charset declared in <meta>
+        - Inline CSS only — no external dependencies
+        """
+        from html import escape
+
+        css = """
+        body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+               font-size: 11pt; line-height: 1.6; margin: 40px auto;
+               max-width: 900px; color: #111; }
+        h1 { font-size: 20pt; margin-top: 1.4em; }
+        h2 { font-size: 16pt; margin-top: 1.2em; }
+        h3 { font-size: 13pt; margin-top: 1em; }
+        h4, h5, h6 { font-size: 11pt; margin-top: 0.8em; }
+        p  { margin: 0.4em 0; }
+        table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+        th, td { border: 1px solid #555; padding: 6px 10px;
+                 text-align: left; vertical-align: top; }
+        th { background: #f0f0f0; font-weight: bold; }
+        """.strip()
+
+        doc_title = escape(title or '문서')
+        lines = [
+            '<!DOCTYPE html>',
+            '<html lang="ko">',
+            '<head>',
+            '  <meta charset="utf-8">',
+            f'  <title>{doc_title}</title>',
+            f'  <style>{css}</style>',
+            '</head>',
+            '<body>',
+        ]
+
+        for block in self.content:
+            if isinstance(block, Paragraph):
+                text = block.text.strip()
+                if not text:
+                    continue
+                level = self._HEADING_MAP.get(block.style_name)
+                safe = escape(text)
+                if level:
+                    lines.append(f'  <h{level}>{safe}</h{level}>')
+                else:
+                    # Preserve line breaks within a paragraph
+                    inner = escape(block.text).replace('\n', '<br>\n    ')
+                    lines.append(f'  <p>{inner}</p>')
+
+            elif isinstance(block, Table):
+                if not block.cells:
+                    continue
+                grid: dict = {}
+                for c in block.cells:
+                    key = (c.row, c.col)
+                    grid[key] = grid.get(key, '') + c.text
+
+                lines.append('  <table>')
+                for r in range(block.rows):
+                    lines.append('    <tr>')
+                    for c in range(block.cols):
+                        cell_text = grid.get((r, c), '').strip()
+                        inner = escape(cell_text).replace('\n', '<br>\n      ')
+                        tag = 'th' if r == 0 else 'td'
+                        lines.append(f'      <{tag}>{inner}</{tag}>')
+                    lines.append('    </tr>')
+                lines.append('  </table>')
+
+        lines += ['</body>', '</html>']
+        return '\n'.join(lines)
+
     def to_json(self) -> dict:
         blocks = []
         for block in self.content:

@@ -1,11 +1,12 @@
 """
-CLI for HWP → text/markdown/JSON conversion.
+CLI for HWP → text/markdown/HTML/JSON conversion.
 
 Usage:
   python cli.py document.hwp                 # prints markdown
+  python cli.py document.hwp -f html -o out.html   # Google Docs 임포트용 HTML
   python cli.py document.hwp -f text         # plain text
   python cli.py document.hwp -f json         # JSON
-  python cli.py document.hwp -o output.md    # write to file
+  python cli.py document.hwp -f llm          # LLM 프롬프트 최적화 텍스트
 """
 
 import argparse
@@ -30,10 +31,10 @@ formats:
     parser.add_argument('input', help='HWP or HWPX file path')
     parser.add_argument(
         '-f', '--format',
-        choices=['markdown', 'text', 'json', 'llm'],
+        choices=['markdown', 'html', 'text', 'json', 'llm'],
         default='markdown',
         dest='fmt',
-        help='Output format (default: markdown). llm = compact XML-tagged format for LLM prompts',
+        help='Output format (default: markdown). html = Google Docs importable HTML',
     )
     parser.add_argument(
         '-o', '--output',
@@ -63,6 +64,16 @@ formats:
 
     if args.fmt == 'text':
         output = doc.to_text()
+    elif args.fmt == 'html':
+        title = Path(args.input).stem
+        output = doc.to_html(title=title)
+        if args.output is None:
+            # Default output file name when format is html
+            default_out = Path(args.input).with_suffix('.html')
+            default_out.write_text(output, encoding='utf-8')
+            print(f'Saved: {default_out}')
+            print('Google Docs에 가져오기: 구글 드라이브에 파일 업로드 후 "Google 문서로 열기"')
+            return
     elif args.fmt == 'json':
         output = json.dumps(doc.to_json(), ensure_ascii=False, indent=2)
     elif args.fmt == 'llm':
