@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HWP → HTML 변환기</title>
   <script src="https://cdn.jsdelivr.net/npm/cfb@1/dist/cfb.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -485,9 +486,104 @@ async function parseHwp(arrayBuffer, filename) {
 // HWPX (ZIP/XML) 파서
 // ─────────────────────────────────────────────
 async function parseHwpx(arrayBuffer) {
-  // JSZip 없이 ZIP 파싱은 복잡하므로 안내 메시지 반환
-  // TODO: JSZip CDN 추가 시 구현 가능
-  throw new Error('HWPX 형식은 아직 지원 준비 중입니다. .hwp 파일로 저장 후 시도해주세요.');
+  const zip = await JSZip.loadAsync(arrayBuffer);
+
+  // 스타일 맵: styleIDRef → 스타일 이름 (header.xml에서 추출)
+  const styles = {};
+  const headerFile = zip.file('Contents/header.xml');
+  if (headerFile) {
+    const xml = await headerFile.async('string');
+    const doc = new DOMParser().parseFromString(xml, 'text/xml');
+    for (const el of doc.getElementsByTagName('*')) {
+      if (el.localName === 'style') {
+        const id = el.getAttribute('id');
+        const name = el.getAttribute('name');
+        if (id !== null && name) styles[id] = name;
+      }
+    }
+  }
+
+  // 섹션 파일 목록 (Contents/section0.xml, section1.xml, …)
+  const sectionFiles = Object.keys(zip.files)
+    .filter(n => /Contents\/section\d+\.xml$/i.test(n))
+    .sort((a, b) => {
+      const num = s => parseInt(s.match(/(\d+)\.xml$/)?.[1] ?? '0');
+      return num(a) - num(b);
+    });
+
+  const content = [];
+  for (const filename of sectionFiles) {
+    const xmlStr = await zip.files[filename].async('string');
+    const xmlDoc = new DOMParser().parseFromString(xmlStr, 'text/xml');
+    _parseSectionXml(xmlDoc.documentElement, styles, content);
+  }
+
+  return { content, version: 'HWPX' };
+}
+
+function _parseSectionXml(root, styles, content) {
+  // 섹션 루트의 직접 자식 <p> 요소만 처리 (표 안의 <p>는 별도 처리)
+  for (const child of root.children) {
+    if (child.localName === 'p') {
+      _processPara(child, styles, content);
+    }
+  }
+}
+
+function _processPara(pEl, styles, content) {
+  // 표를 직접 포함하는 단락인지 확인
+  const tblChild = Array.from(pEl.children).find(c => c.localName === 'tbl');
+  if (tblChild) {
+    _processTable(tblChild, styles, content);
+    return;
+  }
+  const styleRef = pEl.getAttribute('styleIDRef') ?? '0';
+  const text = _paraText(pEl);
+  if (text.trim()) {
+    content.push({ type: 'paragraph', text, style: styles[styleRef] ?? '' });
+  }
+}
+
+function _paraText(pEl) {
+  // 단락 안의 모든 <t> 텍스트 노드 수집
+  const parts = [];
+  for (const el of pEl.getElementsByTagName('*')) {
+    if (el.localName === 't') parts.push(el.textContent ?? '');
+  }
+  return parts.join('');
+}
+
+function _processTable(tblEl, styles, content) {
+  const trs = Array.from(tblEl.getElementsByTagName('*')).filter(e => e.localName === 'tr');
+  if (!trs.length) return;
+
+  const rows = trs.length;
+  const cols = Math.max(...trs.map(tr =>
+    Array.from(tr.children).filter(c => c.localName === 'tc').length
+  ));
+
+  const table = { type: 'table', rows, cols, cells: [] };
+  content.push(table);
+
+  trs.forEach((tr, ri) => {
+    Array.from(tr.children)
+      .filter(c => c.localName === 'tc')
+      .forEach((tc, ci) => {
+        // 셀 좌표는 cellAddr 속성으로 명시되기도 함
+        const addr = Array.from(tc.children).find(c => c.localName === 'cellAddr');
+        const row = addr ? parseInt(addr.getAttribute('r') ?? ri) : ri;
+        const col = addr ? parseInt(addr.getAttribute('c') ?? ci) : ci;
+
+        // 셀 안의 단락들을 텍스트로
+        const cellText = Array.from(tc.getElementsByTagName('*'))
+          .filter(e => e.localName === 'p')
+          .map(p => _paraText(p))
+          .filter(t => t.trim())
+          .join('\n');
+
+        table.cells.push({ row, col, text: cellText });
+      });
+  });
 }
 
 // ─────────────────────────────────────────────
