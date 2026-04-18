@@ -265,7 +265,7 @@ function* iterRecords(buf) {
     }
     const data = buf.slice(i, i + size);
     i += size;
-    yield { tag, data };
+    yield { tag, level: (header >> 10) & 0xF, data };
   }
 }
 
@@ -301,6 +301,9 @@ function extractParaText(data) {
       chars.push('\n');
     } else if (code === 0x09) {
       chars.push('\t');
+    } else if (code === 0x1E) {
+      chars.push('\x1E'); // 이미지 자리 표시자 (나중에 img 태그로 치환)
+      i += 14;
     } else if (code >= 0x01 && code <= 0x1F) {
       i += 14; // 인라인 오브젝트 7 words 스킵 (루프에서 +2 추가됨 → 총 16 bytes)
     } else {
@@ -313,41 +316,59 @@ function extractParaText(data) {
 // ─────────────────────────────────────────────
 // 섹션 파싱 (문서 순서 보존)
 // ─────────────────────────────────────────────
-function parseSection(buf, styles) {
+function parseSection(buf, styles, images = []) {
   const content = [];
   let currentStyleIdx = 0;
-  let currentTable = null;
-  let currentCell  = null;
-  let tableRow = -1, tableCol = -1;
+  // 스택 기반: 테이블이 중첩되어도 동작
+  // 각 항목: { table, cell, row, col, tableLevel }
+  const stack = [];
+  let imgIdx = 0;
 
-  for (const rec of iterRecords(buf)) {
-    if (rec.tag === TAG_PARA_HEADER) {
-      currentStyleIdx = rec.data.length >= 10 ? rec.data[8] : 0;
+  for (const { tag, level, data } of iterRecords(buf)) {
+    // 레코드 레벨이 현재 테이블 레벨보다 낮으면 테이블 컨텍스트 탈출
+    while (stack.length > 0 && level < stack[stack.length - 1].tableLevel) {
+      stack.pop();
+    }
+    const ctx = stack.length > 0 ? stack[stack.length - 1] : null;
 
-    } else if (rec.tag === TAG_PARA_TEXT) {
-      const text = extractParaText(rec.data);
-      if (currentCell !== null) {
-        currentCell.text += text;
+    if (tag === TAG_PARA_HEADER) {
+      currentStyleIdx = data.length >= 10 ? data[8] : 0;
+
+    } else if (tag === TAG_PARA_TEXT) {
+      let text = extractParaText(data);
+      // 이미지 자리 표시자를 실제 img 태그로 치환
+      if (text.includes('\x1E') && images.length > 0) {
+        text = text.replace(/\x1E/g, () => {
+          const img = images[imgIdx % images.length];
+          imgIdx++;
+          return img ? `\x02IMG:${img}\x03` : '[이미지]';
+        });
       } else {
-        currentTable = null;
+        text = text.replace(/\x1E/g, '[이미지]');
+      }
+
+      if (ctx) {
+        ctx.cell.text += text;
+      } else {
         content.push({ type: 'paragraph', text, style: styles[currentStyleIdx] || '' });
       }
 
-    } else if (rec.tag === TAG_TABLE) {
-      if (rec.data.length >= 8) {
-        const rv = new DataView(rec.data.buffer, rec.data.byteOffset, rec.data.byteLength);
+    } else if (tag === TAG_TABLE) {
+      if (data.length >= 8) {
+        const rv = new DataView(data.buffer, data.byteOffset, data.byteLength);
         const rows = rv.getUint16(4, true);
         const cols = rv.getUint16(6, true);
-        currentTable = { type: 'table', rows, cols, cells: [] };
-        content.push(currentTable);
-        tableRow = -1; tableCol = -1; currentCell = null;
+        const table = { type: 'table', rows, cols, cells: [] };
+        content.push(table);
+        stack.push({ table, cell: null, row: -1, col: -1, tableLevel: level });
       }
 
-    } else if (rec.tag === TAG_LIST_HEADER && currentTable !== null) {
-      tableCol++;
-      if (tableCol >= currentTable.cols) { tableCol = 0; tableRow++; }
-      currentCell = { row: tableRow, col: tableCol, text: '' };
-      currentTable.cells.push(currentCell);
+    } else if (tag === TAG_LIST_HEADER && stack.length > 0) {
+      const top = stack[stack.length - 1];
+      top.col++;
+      if (top.col >= top.table.cols) { top.col = 0; top.row++; }
+      top.cell = { row: top.row, col: top.col, text: '' };
+      top.table.cells.push(top.cell);
     }
   }
   return content;
@@ -358,6 +379,16 @@ function parseSection(buf, styles) {
 // ─────────────────────────────────────────────
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// 텍스트를 HTML로 변환: 이미지 마커 → <img>, 줄바꿈 → <br>
+function renderText(s) {
+  return s
+    .split(/\x02IMG:([^\x03]*)\x03/)
+    .map((part, i) => i % 2 === 1
+      ? `<img src="${part}" style="max-width:100%;height:auto">`
+      : escHtml(part).replace(/\n/g, '<br>'))
+    .join('');
 }
 
 function contentToHtml(content, title) {
@@ -381,9 +412,11 @@ function contentToHtml(content, title) {
       if (level) {
         parts.push(`<h${level}>${escHtml(text)}</h${level}>`);
       } else {
-        const inner = escHtml(block.text).replace(/\n/g, '<br>');
+        const inner = renderText(block.text);
         parts.push(`<p>${inner}</p>`);
       }
+    } else if (block.type === 'image') {
+      parts.push(`<p><img src="${block.src}" style="max-width:100%;height:auto"></p>`);
     } else if (block.type === 'table' && block.cells.length > 0) {
       const grid = {};
       for (const c of block.cells) {
@@ -394,7 +427,7 @@ function contentToHtml(content, title) {
       for (let r = 0; r < block.rows; r++) {
         let cells = '';
         for (let c = 0; c < block.cols; c++) {
-          const val = escHtml((grid[`${r},${c}`] || '').trim()).replace(/\n/g,'<br>');
+          const val = renderText((grid[`${r},${c}`] || '').trim());
           const tag = r === 0 ? 'th' : 'td';
           cells += `<${tag}>${val}</${tag}>`;
         }
@@ -458,6 +491,25 @@ async function parseHwp(arrayBuffer, filename) {
     styles = parseStyles(buf);
   }
 
+  // BinData 이미지 추출 (OLE 스트림에서 JPEG/PNG/GIF/BMP 감지)
+  const images = [];
+  for (const entry of (cfb.FileIndex || [])) {
+    if (!entry || entry.type !== 2) continue;
+    const name = (entry.name || '').toUpperCase();
+    if (!name.includes('BIN')) continue;
+    let raw = new Uint8Array(entry.content || []);
+    if (!raw.length) continue;
+    // zlib 압축 시도
+    const decompressed = await decompressRaw(raw);
+    // 원본과 길이가 다르면 압축 해제된 것 사용
+    raw = decompressed.length > raw.length ? decompressed : raw;
+    const mime = _detectImageMime(raw);
+    if (mime) {
+      const b64 = btoa(String.fromCharCode(...raw.slice(0, 10_000_000)));
+      images.push(`data:${mime};base64,${b64}`);
+    }
+  }
+
   // BodyText/Section* 파싱
   const content = [];
   for (let i = 0; ; i++) {
@@ -465,7 +517,7 @@ async function parseHwp(arrayBuffer, filename) {
     if (!entry) break;
     let buf = new Uint8Array(entry.content);
     if (compressed) buf = await decompressRaw(buf);
-    content.push(...parseSection(buf, styles));
+    content.push(...parseSection(buf, styles, images));
   }
 
   // 폴백: PrvText (미리보기 텍스트 스트림)
@@ -480,6 +532,15 @@ async function parseHwp(arrayBuffer, filename) {
   }
 
   return { content, version };
+}
+
+function _detectImageMime(bytes) {
+  if (bytes[0] === 0xFF && bytes[1] === 0xD8) return 'image/jpeg';
+  if (bytes[0] === 0x89 && bytes[1] === 0x50) return 'image/png';
+  if (bytes[0] === 0x47 && bytes[1] === 0x49) return 'image/gif';
+  if (bytes[0] === 0x42 && bytes[1] === 0x4D) return 'image/bmp';
+  if (bytes[0] === 0x52 && bytes[1] === 0x49) return 'image/webp'; // RIFF/WEBP
+  return null;
 }
 
 // ─────────────────────────────────────────────
@@ -511,41 +572,102 @@ async function parseHwpx(arrayBuffer) {
       return num(a) - num(b);
     });
 
+  // BinData 이미지 추출 (ZIP 안의 이미지 파일들)
+  const images = {};  // filename → data URI
+  for (const [name, file] of Object.entries(zip.files)) {
+    if (file.dir) continue;
+    const lower = name.toLowerCase();
+    const mimeMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+                      gif: 'image/gif',  bmp: 'image/bmp',  webp: 'image/webp' };
+    const ext = lower.split('.').pop();
+    if (!mimeMap[ext]) continue;
+    const bytes = await file.async('uint8array');
+    const b64 = btoa(String.fromCharCode(...bytes));
+    images[name] = `data:${mimeMap[ext]};base64,${b64}`;
+  }
+
+  // content.hpf 에서 binaryItemID → 파일 경로 매핑 파싱
+  const binMap = {};  // id → data URI
+  const hpfFile = zip.file('Contents/content.hpf') || zip.file(/\.hpf$/i)?.[0];
+  if (hpfFile) {
+    const hpfXml = await hpfFile.async('string');
+    const hpfDoc = new DOMParser().parseFromString(hpfXml, 'text/xml');
+    for (const el of hpfDoc.getElementsByTagName('*')) {
+      if (el.localName === 'item' || el.localName === 'manifest-item') {
+        const id   = el.getAttribute('id') || el.getAttribute('ID');
+        const href = el.getAttribute('href') || el.getAttribute('HREF') || '';
+        const fullPath = 'Contents/' + href.replace(/^\.\//, '');
+        if (id && images[fullPath]) binMap[id] = images[fullPath];
+        if (id && images[href])     binMap[id] = images[href];
+      }
+    }
+  }
+
   const content = [];
   for (const filename of sectionFiles) {
     const xmlStr = await zip.files[filename].async('string');
     const xmlDoc = new DOMParser().parseFromString(xmlStr, 'text/xml');
-    _parseSectionXml(xmlDoc.documentElement, styles, content);
+    _parseSectionXml(xmlDoc.documentElement, styles, content, binMap);
   }
 
   return { content, version: 'HWPX' };
 }
 
-function _parseSectionXml(root, styles, content) {
-  // 섹션 루트의 직접 자식 <p> 요소만 처리 (표 안의 <p>는 별도 처리)
+function _parseSectionXml(root, styles, content, binMap = {}) {
   for (const child of root.children) {
     if (child.localName === 'p') {
-      _processPara(child, styles, content);
+      _processPara(child, styles, content, binMap);
     }
   }
 }
 
-function _processPara(pEl, styles, content) {
-  // 표를 직접 포함하는 단락인지 확인
+function _processPara(pEl, styles, content, binMap = {}) {
   const tblChild = Array.from(pEl.children).find(c => c.localName === 'tbl');
   if (tblChild) {
-    _processTable(tblChild, styles, content);
+    _processTable(tblChild, styles, content, binMap);
     return;
   }
   const styleRef = pEl.getAttribute('styleIDRef') ?? '0';
-  const text = _paraText(pEl);
-  if (text.trim()) {
+  const parts = _paraContent(pEl, binMap);
+
+  // parts가 이미지만 있는 경우 image 블록으로, 텍스트 포함 시 paragraph로
+  const hasImg  = parts.some(p => p.type === 'image');
+  const hasText = parts.some(p => p.type === 'text' && p.value.trim());
+
+  if (!hasImg && !hasText) return;
+
+  if (hasImg && !hasText) {
+    for (const p of parts) {
+      if (p.type === 'image') content.push({ type: 'image', src: p.src });
+    }
+  } else {
+    // 텍스트에 이미지 마커 삽입
+    const text = parts.map(p =>
+      p.type === 'image' ? `\x02IMG:${p.src}\x03` : p.value
+    ).join('');
     content.push({ type: 'paragraph', text, style: styles[styleRef] ?? '' });
   }
 }
 
+// 단락 내 콘텐츠를 { type:'text', value } | { type:'image', src } 배열로 반환
+function _paraContent(pEl, binMap) {
+  const parts = [];
+  for (const el of pEl.getElementsByTagName('*')) {
+    const ln = el.localName;
+    if (ln === 't') {
+      parts.push({ type: 'text', value: el.textContent ?? '' });
+    } else if (ln === 'img' || ln === 'pic') {
+      const ref = el.getAttribute('binaryItemIDRef') ||
+                  el.getAttribute('itemIDRef') ||
+                  el.getAttribute('href') || '';
+      const src = binMap[ref] || binMap['Contents/' + ref] || '';
+      if (src) parts.push({ type: 'image', src });
+    }
+  }
+  return parts;
+}
+
 function _paraText(pEl) {
-  // 단락 안의 모든 <t> 텍스트 노드 수집
   const parts = [];
   for (const el of pEl.getElementsByTagName('*')) {
     if (el.localName === 't') parts.push(el.textContent ?? '');
@@ -553,7 +675,7 @@ function _paraText(pEl) {
   return parts.join('');
 }
 
-function _processTable(tblEl, styles, content) {
+function _processTable(tblEl, styles, content, binMap = {}) {
   const trs = Array.from(tblEl.getElementsByTagName('*')).filter(e => e.localName === 'tr');
   if (!trs.length) return;
 
@@ -574,10 +696,12 @@ function _processTable(tblEl, styles, content) {
         const row = addr ? parseInt(addr.getAttribute('r') ?? ri) : ri;
         const col = addr ? parseInt(addr.getAttribute('c') ?? ci) : ci;
 
-        // 셀 안의 단락들을 텍스트로
+        // 셀 안의 단락들을 텍스트로 (이미지 마커 포함)
         const cellText = Array.from(tc.getElementsByTagName('*'))
           .filter(e => e.localName === 'p')
-          .map(p => _paraText(p))
+          .map(p => _paraContent(p, binMap)
+            .map(pt => pt.type === 'image' ? `\x02IMG:${pt.src}\x03` : pt.value)
+            .join(''))
           .filter(t => t.trim())
           .join('\n');
 
