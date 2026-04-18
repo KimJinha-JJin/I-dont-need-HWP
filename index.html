@@ -705,6 +705,27 @@ function _paraText(pEl) {
   return parts.join('');
 }
 
+function _collectCellContent(el, binMap) {
+  let text = '';
+  const nestedTables = [];
+  for (const child of el.children) {
+    const ln = child.localName;
+    if (ln === 'p') {
+      const line = _paraContent(child, binMap)
+        .map(pt => pt.type === 'image' ? `\x02IMG:${pt.src}\x03` : pt.value)
+        .join('');
+      if (line.trim()) text += (text ? '\n' : '') + line;
+    } else if (ln === 'tbl') {
+      nestedTables.push(child);
+    } else {
+      const { text: t, nestedTables: nt } = _collectCellContent(child, binMap);
+      if (t) text += (text ? '\n' : '') + t;
+      nestedTables.push(...nt);
+    }
+  }
+  return { text, nestedTables };
+}
+
 function _processTable(tblEl, styles, content, binMap = {}) {
   // .children 으로 직접 자식 <tr>만 — getElementsByTagName 쓰면 중첩 테이블의 행까지 포함됨
   const trs = Array.from(tblEl.children).filter(c => c.localName === 'tr');
@@ -725,20 +746,8 @@ function _processTable(tblEl, styles, content, binMap = {}) {
         const row = addr ? parseInt(addr.getAttribute('r') ?? ri) : ri;
         const col = addr ? parseInt(addr.getAttribute('c') ?? ci) : ci;
 
-        // 셀의 직접 자식만 처리: <p> → 텍스트, <tbl> → 중첩 테이블
-        // (getElementsByTagName 을 쓰면 중첩 테이블 안의 <p>까지 끌어옴)
-        let cellText = '';
-        const nestedTables = [];
-        for (const child of tc.children) {
-          if (child.localName === 'p') {
-            const line = _paraContent(child, binMap)
-              .map(pt => pt.type === 'image' ? `\x02IMG:${pt.src}\x03` : pt.value)
-              .join('');
-            if (line.trim()) cellText += (cellText ? '\n' : '') + line;
-          } else if (child.localName === 'tbl') {
-            nestedTables.push(child);
-          }
-        }
+        // <subList> 같은 래퍼를 재귀 탐색하여 <p> 텍스트 수집, <tbl>은 별도 처리
+        const { text: cellText, nestedTables } = _collectCellContent(tc, binMap);
 
         table.cells.push({ row, col, text: cellText });
 
