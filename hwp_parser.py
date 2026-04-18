@@ -386,10 +386,9 @@ def _parse_section(buf: bytes, styles: dict) -> List[Block]:
     current_style_idx = 0
     current_table: Table | None = None
     current_cell: Cell | None = None
-    table_row = -1
-    table_col = -1
-    # Track nesting level to know when we exit a table's cell lists
-    table_list_level: int | None = None
+    table_cell_index = 0
+    # Nesting level of TAG_TABLE record, used to detect table scope
+    table_level: int | None = None
 
     for rec in iter_records(buf):
         if rec.tag == TAG_PARA_HEADER:
@@ -413,19 +412,20 @@ def _parse_section(buf: bytes, styles: dict) -> List[Block]:
                 cols = struct.unpack_from('<H', rec.data, 6)[0]
                 current_table = Table(rows=rows, cols=cols)
                 content.append(current_table)
-                table_row = -1
-                table_col = -1
+                table_cell_index = 0
                 current_cell = None
-                table_list_level = rec.level
+                table_level = rec.level
 
         elif rec.tag == TAG_LIST_HEADER and current_table is not None:
-            # Each TAG_LIST_HEADER at the expected nesting level is a cell
-            table_col += 1
-            if table_col >= current_table.cols:
-                table_col = 0
-                table_row += 1
-            current_cell = Cell(row=table_row, col=table_col)
+            # Table cells are nested below TAG_TABLE level; ignore unrelated lists
+            if table_level is None or rec.level <= table_level:
+                continue
+            if table_cell_index >= current_table.rows * current_table.cols:
+                continue
+            row, col = divmod(table_cell_index, current_table.cols)
+            current_cell = Cell(row=row, col=col)
             current_table.cells.append(current_cell)
+            table_cell_index += 1
 
     return content
 
