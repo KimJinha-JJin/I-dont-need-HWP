@@ -106,7 +106,14 @@ index.html        브라우저 앱 (cfb.js + 순수 JS, 설치 불필요)
 hwp_parser.py     Python 파서 라이브러리
 cli.py            커맨드라인 인터페이스
 requirements.txt  의존성 (olefile)
+samples/          표 추출 검증용 샘플 데이터
 ```
+
+### 표 추출 검증 샘플
+
+- `samples/table_validation_sample.json`  
+  테이블 셀 순서가 `(0,0)`부터 자연스럽게 매핑되는지, 그리고 `rows * cols`를 넘는
+  `LIST_HEADER`가 무시되는지 확인하기 위한 검증 샘플입니다.
 
 ---
 
