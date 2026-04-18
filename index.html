@@ -795,38 +795,58 @@ function _collectCellContent(el, binMap) {
 }
 
 function _processTable(tblEl, styles, content, binMap = {}) {
-  // .children 으로 직접 자식 <tr>만 — getElementsByTagName 쓰면 중첩 테이블의 행까지 포함됨
   const trs = Array.from(tblEl.children).filter(c => c.localName === 'tr');
   if (!trs.length) return;
 
-  const cols = Math.max(...trs.map(tr =>
-    Array.from(tr.children).filter(c => c.localName === 'tc').length
-  ), 1);
-
-  const table = { type: 'table', rows: trs.length, cols, cells: [] };
-  content.push(table);
-
+  // 1단계: 모든 셀 읽기 — cellAddr 절대 좌표 우선, 없으면 DOM 순서 폴백
+  const rawCells = [];
+  // DOM 순서 폴백용 occupied 추적 (cellAddr 없는 파일 대비)
+  const domOccupied = new Set();
   trs.forEach((tr, ri) => {
+    let domCol = 0;
     Array.from(tr.children)
       .filter(c => c.localName === 'tc')
-      .forEach((tc, ci) => {
+      .forEach(tc => {
         const addr = Array.from(tc.getElementsByTagName('*')).find(c => c.localName === 'cellAddr');
-        const row = addr ? parseInt(addr.getAttribute('r') ?? ri) : ri;
-        const col = addr ? parseInt(addr.getAttribute('c') ?? ci) : ci;
-        const rowSpan = addr ? (parseInt(addr.getAttribute('rowSpan') || addr.getAttribute('rowspan') || '1') || 1) : 1;
-        const colSpan = addr ? (parseInt(addr.getAttribute('colSpan') || addr.getAttribute('colspan') || '1') || 1) : 1;
-
-        // <subList> 같은 래퍼를 재귀 탐색하여 <p> 텍스트 수집, <tbl>은 별도 처리
-        const { text: cellText, html: cellHtml, nestedTables } = _collectCellContent(tc, binMap);
-
-        table.cells.push({ row, col, rowSpan, colSpan, text: cellText, html: cellHtml });
-
-        // 중첩 테이블은 content 에 별도 블록으로 추가
-        for (const nested of nestedTables) {
-          _processTable(nested, styles, content, binMap);
+        let row, col, rowSpan, colSpan;
+        if (addr && addr.getAttribute('r') !== null) {
+          row     = parseInt(addr.getAttribute('r'));
+          col     = parseInt(addr.getAttribute('c'));
+          rowSpan = parseInt(addr.getAttribute('rowSpan') || addr.getAttribute('rowspan') || '1') || 1;
+          colSpan = parseInt(addr.getAttribute('colSpan') || addr.getAttribute('colspan') || '1') || 1;
+        } else {
+          // cellAddr 없음 — occupied 그리드로 실제 열 위치 찾기
+          while (domOccupied.has(`${ri},${domCol}`)) domCol++;
+          row = ri; col = domCol; rowSpan = 1; colSpan = 1;
         }
+        // 이후 행의 동일 열 위치를 occupied로 표시
+        for (let dr = 0; dr < rowSpan; dr++) {
+          for (let dc = 0; dc < colSpan; dc++) {
+            if (dr > 0 || dc > 0) domOccupied.add(`${ri+dr},${col+dc}`);
+          }
+        }
+        domCol = col + colSpan;
+
+        const { text: cellText, html: cellHtml, nestedTables } = _collectCellContent(tc, binMap);
+        rawCells.push({ row, col, rowSpan, colSpan, text: cellText, html: cellHtml, nestedTables });
       });
   });
+
+  if (!rawCells.length) return;
+
+  // 2단계: 실제 치수 = 절대 좌표 + span의 최댓값 (DOM 개수보다 정확)
+  const rows = Math.max(...rawCells.map(c => c.row + c.rowSpan));
+  const cols = Math.max(...rawCells.map(c => c.col + c.colSpan));
+
+  const table = { type: 'table', rows, cols, cells: [] };
+  content.push(table);
+
+  for (const { nestedTables, ...cell } of rawCells) {
+    table.cells.push(cell);
+    for (const nested of nestedTables) {
+      _processTable(nested, styles, content, binMap);
+    }
+  }
 }
 
 // ─────────────────────────────────────────────
