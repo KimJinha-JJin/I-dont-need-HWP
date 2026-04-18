@@ -1,0 +1,21 @@
+{
+  "name": "table_cell_order_and_bounds",
+  "purpose": "표 셀 순서(0,0부터)와 rows*cols 초과 LIST_HEADER 무시 동작 검증",
+  "table": {
+    "rows": 2,
+    "cols": 3
+  },
+  "simulated_list_header_count": 8,
+  "expected_cells": [
+    { "row": 0, "col": 0, "text": "A1" },
+    { "row": 0, "col": 1, "text": "A2" },
+    { "row": 0, "col": 2, "text": "A3" },
+    { "row": 1, "col": 0, "text": "B1" },
+    { "row": 1, "col": 1, "text": "B2" },
+    { "row": 1, "col": 2, "text": "B3" }
+  ],
+  "notes": [
+    "LIST_HEADER가 8번 오더라도 2x3 표에서는 6개 셀까지만 생성되어야 함",
+    "첫 번째 셀은 row=-1이 아니라 row=0,col=0이어야 함"
+  ]
+}

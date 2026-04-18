@@ -320,7 +320,7 @@ function parseSection(buf, styles, images = []) {
   const content = [];
   let currentStyleIdx = 0;
   // 스택 기반: 테이블이 중첩되어도 동작
-  // 각 항목: { table, cell, row, col, tableLevel }
+  // 각 항목: { table, cell, cellIndex, tableLevel }
   const stack = [];
   let imgIdx = 0;
 
@@ -374,16 +374,19 @@ function parseSection(buf, styles, images = []) {
         const table = { type: 'table', rows, cols, cells: [] };
         content.push(table);
         // tableLevel은 첫 TAG_LIST_HEADER가 오기 전까지 null — 실제 레벨로 확정됨
-        stack.push({ table, cell: null, row: -1, col: -1, tableLevel: null });
+        stack.push({ table, cell: null, cellIndex: 0, tableLevel: null });
       }
 
     } else if (tag === TAG_LIST_HEADER && stack.length > 0) {
       const top = stack[stack.length - 1];
       if (top.tableLevel === null) top.tableLevel = level; // 첫 LIST_HEADER로 레벨 확정
-      top.col++;
-      if (top.col >= top.table.cols) { top.col = 0; top.row++; }
-      top.cell = { row: top.row, col: top.col, text: '' };
+      // 테이블 범위를 벗어나는 LIST_HEADER는 무시
+      if (top.cellIndex >= top.table.rows * top.table.cols) continue;
+      const row = Math.floor(top.cellIndex / top.table.cols);
+      const col = top.cellIndex % top.table.cols;
+      top.cell = { row, col, text: '' };
       top.table.cells.push(top.cell);
+      top.cellIndex++;
     }
   }
   return content;
