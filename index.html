@@ -363,8 +363,7 @@ function parseSection(buf, styles, images = []) {
       // 이미지 자리 표시자를 실제 img 태그로 치환
       if (text.includes('\x1E') && images.length > 0) {
         text = text.replace(/\x1E/g, () => {
-          const img = images[imgIdx % images.length];
-          imgIdx++;
+          const img = images[imgIdx++];
           return img ? `\x02IMG:${img}\x03` : '[이미지]';
         });
       } else {
@@ -670,16 +669,6 @@ async function parseHwpx(arrayBuffer) {
   return { content, version: 'HWPX' };
 }
 
-// <p> 요소가 <tbl>/<tc> 안에 있는지 확인 (레거시 — 더 이상 호출되지 않음)
-function _isInsideTable(el, root) {
-  let p = el.parentElement;
-  while (p && p !== root) {
-    if (p.localName === 'tc' || p.localName === 'tbl') return true;
-    p = p.parentElement;
-  }
-  return false;
-}
-
 function _parseSectionXml(root, styles, content, binMap = {}) {
   for (const child of root.children) {
     const ln = child.localName;
@@ -725,8 +714,14 @@ function _processPara(pEl, styles, content, binMap = {}) {
 // { parts, align } 형태로 반환
 function _paraContent(pEl, binMap) {
   let align = null;
+  let paraPrSeen = false;
+  const parts = [];
+
   for (const el of pEl.getElementsByTagName('*')) {
-    if (el.localName === 'paraPr') {
+    const ln = el.localName;
+
+    if (!paraPrSeen && ln === 'paraPr') {
+      paraPrSeen = true;
       const alignEl = Array.from(el.children).find(c => c.localName === 'align');
       if (alignEl) {
         const v = alignEl.textContent?.trim().toLowerCase();
@@ -736,14 +731,7 @@ function _paraContent(pEl, binMap) {
         const v = (el.getAttribute('align') || '').toLowerCase();
         if (v === 'center' || v === 'right' || v === 'justify') align = v;
       }
-      break;
-    }
-  }
-
-  const parts = [];
-  for (const el of pEl.getElementsByTagName('*')) {
-    const ln = el.localName;
-    if (ln === 't') {
+    } else if (ln === 't') {
       const run = el.parentElement;
       const fmt = {};
       if (run && run.localName === 'run') {
@@ -770,14 +758,6 @@ function _paraContent(pEl, binMap) {
     }
   }
   return { parts, align };
-}
-
-function _paraText(pEl) {
-  const parts = [];
-  for (const el of pEl.getElementsByTagName('*')) {
-    if (el.localName === 't') parts.push(el.textContent ?? '');
-  }
-  return parts.join('');
 }
 
 function _collectCellContent(el, binMap) {
