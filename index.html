@@ -220,14 +220,26 @@ const HEADING_MAP = {
 };
 
 // ─────────────────────────────────────────────
+// Uint8Array → base64 (spread 연산자 스택 오버플로 방지)
+// ─────────────────────────────────────────────
+function uint8ToBase64(bytes) {
+  let str = '';
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    str += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(str);
+}
+
+// ─────────────────────────────────────────────
 // 압축 해제 (deflate-raw = zlib wbits -15)
 // ─────────────────────────────────────────────
 async function decompressRaw(data) {
   try {
     const ds = new DecompressionStream('deflate-raw');
     const writer = ds.writable.getWriter();
-    writer.write(data);
-    writer.close();
+    await writer.write(data);
+    await writer.close();
 
     const chunks = [];
     const reader = ds.readable.getReader();
@@ -274,7 +286,6 @@ function* iterRecords(buf) {
 // ─────────────────────────────────────────────
 function parseStyles(buf) {
   const styles = {};
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   let idx = 0;
   for (const rec of iterRecords(buf)) {
     if (rec.tag === TAG_STYLE && rec.data.length >= 2) {
@@ -294,9 +305,9 @@ function parseStyles(buf) {
 // ─────────────────────────────────────────────
 function extractParaText(data) {
   const chars = [];
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   for (let i = 0; i + 1 < data.length; i += 2) {
-    const rv = new DataView(data.buffer, data.byteOffset + i, 2);
-    const code = rv.getUint16(0, true);
+    const code = view.getUint16(i, true);
     if (code === 0x0D || code === 0x0A) {
       chars.push('\n');
     } else if (code === 0x09) {
@@ -551,7 +562,7 @@ async function parseHwp(arrayBuffer, filename) {
     raw = decompressed.length > raw.length ? decompressed : raw;
     const mime = _detectImageMime(raw);
     if (mime) {
-      const b64 = btoa(String.fromCharCode(...raw.slice(0, 10_000_000)));
+      const b64 = uint8ToBase64(raw);
       images.push(`data:${mime};base64,${b64}`);
     }
   }
@@ -628,7 +639,7 @@ async function parseHwpx(arrayBuffer) {
     const ext = lower.split('.').pop();
     if (!mimeMap[ext]) continue;
     const bytes = await file.async('uint8array');
-    const b64 = btoa(String.fromCharCode(...bytes));
+    const b64 = uint8ToBase64(bytes);
     images[name] = `data:${mimeMap[ext]};base64,${b64}`;
   }
 

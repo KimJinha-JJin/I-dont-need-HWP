@@ -393,6 +393,10 @@ def _parse_section(buf: bytes, styles: dict) -> List[Block]:
     for rec in iter_records(buf):
         if rec.tag == TAG_PARA_HEADER:
             current_style_idx = _para_style_index(rec.data)
+            # A PARA_HEADER at or above the table level means we have left the table.
+            if table_level is not None and rec.level <= table_level:
+                current_cell = None
+                current_table = None
 
         elif rec.tag == TAG_PARA_TEXT:
             text = _extract_para_text(rec.data)
@@ -400,7 +404,6 @@ def _parse_section(buf: bytes, styles: dict) -> List[Block]:
                 # Accumulate text into the current table cell
                 current_cell.text += text
             else:
-                current_table = None  # leaving table context
                 content.append(Paragraph(
                     text=text,
                     style_name=styles.get(current_style_idx, ''),
